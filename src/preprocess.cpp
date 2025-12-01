@@ -262,8 +262,6 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
   else
   {
     double time_stamp = rclcpp::Time(msg->header.stamp).seconds();
-    // cout << "===================================" << endl;
-    // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
     for (int i = 0; i < pl_orig.points.size(); i++)
     {
       if (i % point_filter_num != 0)
@@ -558,6 +556,7 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
 
 void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
 {
+  printf("+++++ DEFAULT HANDLER CALLED +++++\n");
   pl_surf.clear();
   pl_corn.clear();
   pl_full.clear();
