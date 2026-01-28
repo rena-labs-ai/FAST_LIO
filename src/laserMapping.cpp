@@ -90,6 +90,8 @@ string map_file_path, lid_topic, imu_topic;
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double box_front = 0.2, box_back = 0.2, box_left = 0.2, box_right = 0.2, box_z_min = -0.5, box_z_max = 0.5;
+bool filter_box_en = false;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
@@ -543,22 +545,74 @@ void publish_frame_world(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Share
     */
 }
 
+void publish_frame_world_filtered(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFiltered)
+{
+    if(scan_pub_en && filter_box_en)
+    {
+        PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
+        int size = laserCloudFullRes->points.size();
+        PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI());
+        laserCloudWorld->reserve(size);
+
+        for (int i = 0; i < size; i++)
+        {
+            PointType &point_body = laserCloudFullRes->points[i];
+
+            // Bounding box filter in body frame (around the robot)
+            if (point_body.x <= box_front && point_body.x >= -box_back &&
+                point_body.y <= box_left && point_body.y >= -box_right &&
+                point_body.z <= box_z_max && point_body.z >= box_z_min)
+            {
+                continue; // Inside the box, skip it
+            }
+
+            PointType point_world;
+            RGBpointBodyToWorld(&point_body, &point_world);
+            laserCloudWorld->push_back(point_world);
+        }
+
+        if (!laserCloudWorld->empty())
+        {
+            sensor_msgs::msg::PointCloud2 laserCloudmsg;
+            pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
+            laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+            laserCloudmsg.header.frame_id = "camera_init";
+            pubLaserCloudFiltered->publish(laserCloudmsg);
+        }
+    }
+}
+
 void publish_frame_body(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body)
 {
     int size = feats_undistort->points.size();
-    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
+    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI());
+    laserCloudIMUBody->reserve(size);
 
     for (int i = 0; i < size; i++)
     {
-        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
-                            &laserCloudIMUBody->points[i]);
+        PointType point_imu;
+        RGBpointBodyLidarToIMU(&feats_undistort->points[i], &point_imu);
+
+        // Bounding box filter in body frame (around the robot)
+        if (filter_box_en && 
+            point_imu.x <= box_front && point_imu.x >= -box_back &&
+            point_imu.y <= box_left && point_imu.y >= -box_right &&
+            point_imu.z <= box_z_max && point_imu.z >= box_z_min)
+        {
+            continue; // Inside the box, skip it
+        }
+
+        laserCloudIMUBody->push_back(point_imu);
     }
 
-    sensor_msgs::msg::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
-    laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
-    laserCloudmsg.header.frame_id = "body";
-    pubLaserCloudFull_body->publish(laserCloudmsg);
+    if (!laserCloudIMUBody->empty())
+    {
+        sensor_msgs::msg::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
+        laserCloudmsg.header.stamp = get_ros_time(lidar_end_time);
+        laserCloudmsg.header.frame_id = "body";
+        pubLaserCloudFull_body->publish(laserCloudmsg);
+    }
     publish_count -= PUBFRAME_PERIOD;
 }
 
@@ -821,6 +875,13 @@ public:
         this->declare_parameter<double>("mapping.b_gyr_cov", 0.0001);
         this->declare_parameter<double>("mapping.b_acc_cov", 0.0001);
         this->declare_parameter<double>("preprocess.blind", 0.01);
+        this->declare_parameter<double>("preprocess.box_front", 0.2);
+        this->declare_parameter<double>("preprocess.box_back", 0.2);
+        this->declare_parameter<double>("preprocess.box_left", 0.2);
+        this->declare_parameter<double>("preprocess.box_right", 0.2);
+        this->declare_parameter<double>("preprocess.box_z_min", -0.5);
+        this->declare_parameter<double>("preprocess.box_z_max", 0.5);
+        this->declare_parameter<bool>("preprocess.filter_box_en", false);
         this->declare_parameter<int>("preprocess.lidar_type", AVIA);
         this->declare_parameter<int>("preprocess.scan_line", 16);
         this->declare_parameter<int>("preprocess.timestamp_unit", US);
@@ -857,6 +918,13 @@ public:
         this->get_parameter_or<double>("mapping.b_gyr_cov",b_gyr_cov,0.0001);
         this->get_parameter_or<double>("mapping.b_acc_cov",b_acc_cov,0.0001);
         this->get_parameter_or<double>("preprocess.blind", p_pre->blind, 0.01);
+        this->get_parameter_or<double>("preprocess.box_front", box_front, 0.2);
+        this->get_parameter_or<double>("preprocess.box_back", box_back, 0.2);
+        this->get_parameter_or<double>("preprocess.box_left", box_left, 0.2);
+        this->get_parameter_or<double>("preprocess.box_right", box_right, 0.2);
+        this->get_parameter_or<double>("preprocess.box_z_min", box_z_min, -0.5);
+        this->get_parameter_or<double>("preprocess.box_z_max", box_z_max, 0.5);
+        this->get_parameter_or<bool>("preprocess.filter_box_en", filter_box_en, false);
         this->get_parameter_or<int>("preprocess.lidar_type", p_pre->lidar_type, AVIA);
         this->get_parameter_or<int>("preprocess.scan_line", p_pre->N_SCANS, 16);
         this->get_parameter_or<int>("preprocess.timestamp_unit", p_pre->time_unit, US);
@@ -928,6 +996,7 @@ public:
         }
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
+        pubLaserCloudFiltered_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_filtered", 20);
         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
         pubLaserCloudMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 20);
@@ -1071,6 +1140,7 @@ private:
             /******* Publish points *******/
             if (path_en)                         publish_path(pubPath_);
             if (scan_pub_en)      publish_frame_world(pubLaserCloudFull_);
+            if (scan_pub_en)      publish_frame_world_filtered(pubLaserCloudFiltered_);
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body_);
             if (effect_pub_en) publish_effect_world(pubLaserCloudEffect_);
             // if (map_pub_en) publish_map(pubLaserCloudMap_);
@@ -1130,6 +1200,7 @@ private:
 
 private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFiltered_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudFull_body_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudEffect_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudMap_;
